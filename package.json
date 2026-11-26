@@ -1,0 +1,11 @@
+{
+  "name": "market-observatory",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "validate": "node scripts/validate-artifact.mjs",
+    "deploy": "node scripts/build.mjs && npx --yes wrangler@4 deploy"
+  }
+}
