@@ -9,43 +9,53 @@ const inflight = new Map();
 async function upstream(path, parameters) {
   const url = new URL(path, API);
   url.search = new URLSearchParams(parameters).toString();
-  const response = await fetch(url, {
-    headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(6500),
-  });
-  if (!response.ok) throw new Error(`Taskmarket ${path} returned ${response.status}`);
-  return response.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6500);
+  try {
+    const response = await fetch(url.href, {
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`Taskmarket ${path} returned ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function cached(request, context, refresh, ttl = CACHE_SECONDS) {
   const cache = globalThis.caches?.default;
   const key = request.url;
-  const previous = cache ? await cache.match(request) : localCache.get(key)?.clone();
-  if (previous && Date.now() - Date.parse(previous.headers.get("x-snapshot-time")) < ttl * 1000) {
-    return previous;
+  let previous = localCache.get(key);
+  if (cache && !previous) {
+    try {
+      const hit = await cache.match(request);
+      if (hit) previous = await hit.json();
+    } catch (error) {
+      console.warn("Market cache read:", error.name);
+    }
   }
+  if (previous && Date.now() - Date.parse(previous.asOf) < ttl * 1000) return previous;
   if (!inflight.has(key)) {
     inflight.set(key, (async () => {
-      const data = await refresh();
-      const response = Response.json({ ...data, asOf: new Date().toISOString() }, {
-        headers: { "x-snapshot-time": new Date().toISOString(), "cache-control": "public, max-age=86400" },
-      });
+      const result = { ...(await refresh()), asOf: new Date().toISOString() };
+      if (localCache.size >= 96) localCache.delete(localCache.keys().next().value);
+      localCache.set(key, result);
       if (cache) {
-        const write = cache.put(request, response.clone()).catch(() => {});
+        const write = cache.put(request, Response.json(result, {
+          headers: { "cache-control": "public, max-age=86400" },
+        })).catch(error => console.warn("Market cache write:", error.name));
         if (context?.waitUntil) context.waitUntil(write);
         else await write;
-      } else {
-        if (localCache.size >= 96) localCache.delete(localCache.keys().next().value);
-        localCache.set(key, response.clone());
       }
-      return response;
+      return result;
     })().finally(() => inflight.delete(key)));
   }
   try {
-    return (await inflight.get(key)).clone();
+    return await inflight.get(key);
   } catch (error) {
     if (!previous) throw error;
-    return Response.json({ ...(await previous.json()), stale: true });
+    return { ...previous, stale: true };
   }
 }
 
@@ -180,8 +190,9 @@ export default {
         if (endpoint === "activity") return activity(range, cursor);
         return posters(chain);
       }, endpoint === "posters" ? 600 : CACHE_SECONDS);
-      return new Response(result.body, { headers: { "content-type": "application/json", "cache-control": "no-store" } });
-    } catch {
+      return Response.json(result, { headers: { "cache-control": "no-store" } });
+    } catch (error) {
+      console.error("Market data:", String(error).slice(0, 190));
       return Response.json({ error: "Taskmarket data is temporarily unavailable." }, { status: 502 });
     }
   },

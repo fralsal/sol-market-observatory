@@ -9,7 +9,10 @@ const manifestPath = resolve(projectRoot, "dist/.openai/hosting.json");
 
 const [source, manifest] = await Promise.all([
   readFile(workerPath, "utf8"),
-  readFile(manifestPath, "utf8"),
+  readFile(manifestPath, "utf8").catch(error => {
+    if (error.code !== "ENOENT") throw error;
+    return "{}";
+  }),
 ]);
 JSON.parse(manifest);
 
